@@ -13,8 +13,10 @@
 /retest3.py
 /serve.py
 /signalsample
-/telegram_signal_session.session
+telegram_signal_session.*
 /test.py
 /testsignal.py
 /test_trade.py
-/__pycache__
+__pycache__/
+**/__pycache__/
+**/telegram_signal_session.*
