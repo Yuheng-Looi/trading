@@ -82,21 +82,6 @@ def expand_shorthand_price(base_price_text, short_price_text):
 	return base_price, expanded
 
 
-def calculate_lot_for_max_loss(sl_distance_pips, symbol_info, max_loss_usd=MAX_LOSS_USD):
-	"""
-	Calculate the lot size to ensure max loss is exactly max_loss_usd when SL is hit.
-	Formula: lot = max_loss_usd / (sl_distance_pips * pip_value)
-	"""
-	if sl_distance_pips <= 0:
-		return LOT
-	
-	# Pip value is typically 0.0001 for 4-digit quotes, 0.00001 for 5-digit
-	pip_value = 0.01 if symbol_info.point == 0.0001 else 0.001
-	
-	lot = max_loss_usd / (sl_distance_pips * pip_value)
-	return max(lot, 0.01)  # Minimum 0.01 lot
-
-
 def calculate_dual_entry_prices(current_price, sl, action):
 	"""
 	Calculate the two entry prices for dual order strategy.
@@ -276,7 +261,6 @@ def send_trade(signal_data):
 
 	# Calculate lot size to ensure $15 max loss
 	sl_distance_pips = abs(order1_price - sl) / symbol_info.point
-	calculated_lot = calculate_lot_for_max_loss(sl_distance_pips, symbol_info)
 
 	if not login_demo():
 		print("Trade Skipped: Could not login to demo account.")
@@ -291,7 +275,7 @@ def send_trade(signal_data):
 	request1 = {
 		"action": mt5.TRADE_ACTION_PENDING,
 		"symbol": symbol,
-		"volume": float(calculated_lot),
+		"volume": float(LOT),
 		"type": order1_type,
 		"price": float(round(order1_price, symbol_info.digits)),
 		"sl": float(sl),
@@ -307,7 +291,7 @@ def send_trade(signal_data):
 	request2 = {
 		"action": mt5.TRADE_ACTION_PENDING,
 		"symbol": symbol,
-		"volume": float(calculated_lot),
+		"volume": float(LOT),
 		"type": order1_type,
 		"price": float(round(order2_price, symbol_info.digits)),
 		"sl": float(sl),
