@@ -150,7 +150,7 @@ def get_monitor_price(tick, action):
 
 
 def build_comment():
-	return f"WA SIG {datetime.now().strftime('%Y%m%d-%H%M%S')}"
+	return f"WA SIG {datetime.now().strftime('%H%M%S')}"
 
 
 def signal_side_limit_type(action):
@@ -180,7 +180,8 @@ def send_order_request(account_label, request, description):
 		return None
 
 	if result.retcode != mt5.TRADE_RETCODE_DONE:
-		print(f"[{account_label}] {description} failed retcode={result.retcode}")
+		error = mt5.last_error()
+		print(f"[{account_label}] {description} failed retcode={result.retcode} error={error}")
 		return None
 
 	print(f"[{account_label}] {description} placed ticket={result.order}")
@@ -271,7 +272,6 @@ def place_signal_orders_for_account(account_label, signal_data, signal_tag, curr
 			"symbol": symbol,
 			"volume": float(LOT),
 			"type": order_type,
-			"price": price,
 			"sl": float(sl),
 			"tp": tp,
 			"deviation": 20,
@@ -280,6 +280,12 @@ def place_signal_orders_for_account(account_label, signal_data, signal_tag, curr
 			"type_time": mt5.ORDER_TIME_GTC,
 			"type_filling": mt5.ORDER_FILLING_RETURN,
 		}
+
+		# For pure market orders, price is typically ignored or set to 0 in MT5.
+		if not is_market:
+			request["price"] = price
+		else:
+			request["price"] = 0.0
 
 		result = send_order_request(account_label, request, f"entry {index}")
 		if result is None:
@@ -373,8 +379,31 @@ def cancel_signal_pending_orders_for_account(account_label, signal_data, signal_
 	return cancelled_any
 
 
+def get_current_mt5_login():
+	account_info = mt5.account_info()
+	if account_info is None:
+		return None
+	return getattr(account_info, "login", None)
+
+
 def run_for_all_accounts(accounts, monitor_account, handler):
+	current_login = get_current_mt5_login()
 	for account in accounts:
+		already_active = (
+			monitor_account is not None
+			and account["login"] == monitor_account["login"]
+			and account["server"] == monitor_account["server"]
+			and current_login == monitor_account["login"]
+		)
+
+		if already_active:
+			print(f"[{account['label']}] already active monitor account; using current session")
+			try:
+				handler(account)
+			finally:
+				mt5.shutdown()
+			continue
+
 		if not login_account(account):
 			print(f"[{account['label']}] skipped")
 			continue
@@ -383,8 +412,8 @@ def run_for_all_accounts(accounts, monitor_account, handler):
 		finally:
 			mt5.shutdown()
 
-	if monitor_account and login_account(monitor_account):
-		return True
+	if monitor_account:
+		return login_account(monitor_account)
 
 	return False
 
