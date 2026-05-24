@@ -1,6 +1,10 @@
 # Trading Project - Environment Setup
 
-## 1) Install Python
+## 1) Install MT5 and Python
+
+Download MT5 according to your OS (e.g. Windows) from:
+
+https://www.metatrader5.com/en/download
 
 Download and install Python (standalone installer):
 

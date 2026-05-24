@@ -2,6 +2,10 @@
 
 ## 1) 安装 Python
 
+根据电脑操作系统（OS）的种类，下载MT5平台：
+
+https://www.metatrader5.com/en/download
+
 下载并安装 Python（独立安装程序）：
 
 https://www.python.org/ftp/python/3.14.5/python-3.14.5-amd64.exe
