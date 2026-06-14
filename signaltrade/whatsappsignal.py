@@ -14,7 +14,7 @@ load_dotenv()
 
 MAGIC = 102030
 LOT = 0.01
-TP1_BREAKEVEN_BUFFER = float(os.getenv("WA_BREAKEVEN_BUFFER", "0.40"))
+TP1_BREAKEVEN_BUFFER = float(os.getenv("WA_BREAKEVEN_BUFFER", "1.00"))
 MONITOR_SECONDS = int(os.getenv("WA_MONITOR_SECONDS", "3600"))
 MONITOR_POLL_INTERVAL = float(os.getenv("WA_MONITOR_POLL_INTERVAL", "0.5"))
 
@@ -122,6 +122,11 @@ def is_autotrading_enabled():
 
 def parse_signal(text):
 	if not text:
+		return None
+
+	if "high risk" in text.lower():
+		current_time = datetime.now().strftime('%H:%M:%S')
+		print(f"[{current_time}] high risk signal is skipped, do not trade according to this signal.")
 		return None
 
 	normalized = text.upper()
@@ -234,49 +239,81 @@ async def monitor_signal_async(accounts, monitor_account, signal_data, signal_ta
 	"""
 	Async monitoring coroutine for a single signal.
 	Runs independently and doesn't block other signals from being placed.
+	Monitors TP1 to move SL to entry + 1.0 and cancel pending orders.
+	Monitors TP2 to move SL of the TP3 position to TP1.
 	"""
 	symbol = signal_data["symbol"]
 	action = signal_data["action"]
-	range_low = signal_data["range_low"]
-	range_high = signal_data["range_high"]
 	sl = signal_data["sl"]
 	tp1 = signal_data["tp1"]
+	tp2 = signal_data["tp2"]
 
 	start_ts = time.time()
 	print(f"[ASYNC] Started monitoring {signal_tag} for {symbol}")
 
+	tp1_processed = False
+	tp2_processed = False
+
 	while time.time() - start_ts <= MONITOR_SECONDS:
 		try:
-			# Check MT5 state
+			# Log in to monitor account to read live price
+			if not login_account(monitor_account):
+				await asyncio.sleep(MONITOR_POLL_INTERVAL)
+				continue
+
 			tick = mt5.symbol_info_tick(symbol)
 			if tick is None:
 				await asyncio.sleep(MONITOR_POLL_INTERVAL)
 				continue
 
 			current_price = get_monitor_price(tick, action)
-			tp1_hit = current_price >= tp1 if action == "BUY" else current_price <= tp1
+			
+			# Check SL hit
 			sl_hit = current_price <= sl if action == "BUY" else current_price >= sl
-
-			if tp1_hit:
-				print(f"[ASYNC] {signal_tag}: TP1 reached at {current_price}; moving SL to breakeven buffer and cancelling pending orders.")
-
-				def tp1_actions(account):
-					modify_signal_positions_for_account(account["label"], signal_data, signal_tag)
-					cancel_signal_pending_orders_for_account(account["label"], signal_data, signal_tag)
-
-				if not run_for_all_accounts(accounts, monitor_account, tp1_actions):
-					print(f"[ASYNC] {signal_tag}: Post-TP1 account restoration failed.")
-				return
-
 			if sl_hit:
 				print(f"[ASYNC] {signal_tag}: SL reached at {current_price}; cancelling any remaining pending orders.")
-
 				def sl_cleanup(account):
 					cancel_signal_pending_orders_for_account(account["label"], signal_data, signal_tag)
-
-				if not run_for_all_accounts(accounts, monitor_account, sl_cleanup):
-					print(f"[ASYNC] {signal_tag}: Post-SL account restoration failed.")
+				run_for_all_accounts(accounts, monitor_account, sl_cleanup)
 				return
+
+			# Check TP1 hit
+			if not tp1_processed:
+				tp1_hit = current_price >= tp1 if action == "BUY" else current_price <= tp1
+				if tp1_hit:
+					print(f"[ASYNC] {signal_tag}: TP1 reached at {current_price}; moving SL to entry + buffer and cancelling pending orders.")
+					def tp1_actions(account):
+						modify_signal_positions_for_account(account["label"], signal_data, signal_tag)
+						cancel_signal_pending_orders_for_account(account["label"], signal_data, signal_tag)
+					run_for_all_accounts(accounts, monitor_account, tp1_actions)
+					tp1_processed = True
+
+			# Check TP2 hit (only after TP1 is processed)
+			if tp1_processed and not tp2_processed:
+				tp2_hit = current_price >= tp2 if action == "BUY" else current_price <= tp2
+				if tp2_hit:
+					print(f"[ASYNC] {signal_tag}: TP2 reached at {current_price}; moving TP3 position SL to TP1 ({tp1}).")
+					def tp2_actions(account):
+						modify_tp3_positions_to_tp1_for_account(account["label"], signal_data, signal_tag)
+					run_for_all_accounts(accounts, monitor_account, tp2_actions)
+					tp2_processed = True
+
+			# End monitoring if all positions and orders are closed
+			if tp1_processed:
+				exists = False
+				for account in accounts:
+					if not login_account(account):
+						continue
+					orders = mt5.orders_get(symbol=symbol) or []
+					active_orders = [o for o in orders if str(getattr(o, "comment", "") or "").strip() == signal_tag]
+					positions = mt5.positions_get(symbol=symbol) or []
+					active_positions = [p for p in positions if str(getattr(p, "comment", "") or "").strip() == signal_tag]
+					if len(active_orders) > 0 or len(active_positions) > 0:
+						exists = True
+						break
+				if not exists:
+					print(f"[ASYNC] {signal_tag}: All trades closed. Monitoring complete.")
+					return
 
 			await asyncio.sleep(MONITOR_POLL_INTERVAL)
 
@@ -475,6 +512,48 @@ def modify_signal_positions_for_account(account_label, signal_data, signal_tag):
 	return modified_any
 
 
+def modify_tp3_positions_to_tp1_for_account(account_label, signal_data, signal_tag):
+	symbol = signal_data["symbol"]
+	tp1 = signal_data["tp1"]
+	tp3 = signal_data["tp3"]
+
+	if not signal_is_live(account_label, symbol):
+		return False
+
+	positions = mt5.positions_get(symbol=symbol)
+	if not positions:
+		print(f"[{account_label}] no open positions found for {signal_tag}")
+		return False
+
+	modified_any = False
+	for position in positions:
+		comment = str(getattr(position, "comment", "") or "")
+		if comment != signal_tag:
+			continue
+		
+		# Check if this position aims TP3
+		pos_tp = float(getattr(position, "tp", 0.0) or 0.0)
+		if abs(pos_tp - tp3) > 0.01:
+			continue
+
+		request = {
+			"action": mt5.TRADE_ACTION_SLTP,
+			"position": position.ticket,
+			"symbol": symbol,
+			"sl": float(tp1),
+			"tp": pos_tp,
+			"magic": MAGIC,
+		}
+		result = mt5.order_send(request)
+		if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+			print(f"[{account_label}] position {position.ticket} (aims TP3) SL moved to TP1 ({tp1})")
+			modified_any = True
+		else:
+			print(f"[{account_label}] failed to modify SL to TP1 for position {position.ticket}: {result.retcode if result else mt5.last_error()}")
+
+	return modified_any
+
+
 def cancel_signal_pending_orders_for_account(account_label, signal_data, signal_tag):
 	symbol = signal_data["symbol"]
 
@@ -542,6 +621,82 @@ def run_for_all_accounts(accounts, monitor_account, handler):
 	return False
 
 
+async def monitor_retracement_async(signal_data, accounts, monitor_account):
+	symbol = signal_data["symbol"]
+	action = signal_data["action"]
+	range_low = signal_data["range_low"]
+	range_high = signal_data["range_high"]
+	
+	signal_tag = build_comment()
+	print(f"[RETRACEMENT] Started monitoring retracement for {signal_tag} on {symbol} (5 minutes)")
+
+	start_ts = time.time()
+	while time.time() - start_ts <= 300: # 5 minutes
+		try:
+			# Log in to monitor account to read live price
+			if not login_account(monitor_account):
+				await asyncio.sleep(2)
+				continue
+
+			tick = mt5.symbol_info_tick(symbol)
+			if tick is None:
+				await asyncio.sleep(2)
+				continue
+
+			current_price = get_monitor_price(tick, action)
+			in_zone = range_low <= current_price <= range_high
+
+			if in_zone:
+				print(f"[RETRACEMENT] {signal_tag}: Price retraced back to zone ({current_price}). Checking if orders already exist...")
+				
+				# Check if any limit order or position exists for this signal tag on any account
+				exists = False
+				for account in accounts:
+					if not login_account(account):
+						continue
+					
+					orders = mt5.orders_get(symbol=symbol) or []
+					active_orders = [o for o in orders if str(getattr(o, "comment", "") or "").strip() == signal_tag]
+					
+					positions = mt5.positions_get(symbol=symbol) or []
+					active_positions = [p for p in positions if str(getattr(p, "comment", "") or "").strip() == signal_tag]
+					
+					if len(active_orders) > 0 or len(active_positions) > 0:
+						exists = True
+						break
+				
+				if not exists:
+					print(f"[RETRACEMENT] {signal_tag}: No existing orders found. Entering the trade now!")
+					
+					placed_state = {"placed": False}
+					def place_entries(account):
+						placed = place_signal_orders_for_account(account, signal_data, signal_tag, current_price)
+						placed_state["placed"] = placed_state["placed"] or placed
+
+					# Run for all accounts
+					if run_for_all_accounts(accounts, monitor_account, place_entries):
+						if placed_state["placed"]:
+							# Start the async monitoring task for TP1/TP2/TP3
+							asyncio.create_task(
+								monitor_signal_async(accounts, monitor_account, signal_data, signal_tag)
+							)
+							print(f"[RETRACEMENT] {signal_tag}: Successfully entered trade and started async monitoring.")
+							return
+					else:
+						print(f"[RETRACEMENT] {signal_tag}: Failed to enter trade on all accounts.")
+				else:
+					print(f"[RETRACEMENT] {signal_tag}: Orders/positions already exist. Skipping entry.")
+					return
+
+			await asyncio.sleep(2)
+
+		except Exception as e:
+			print(f"[RETRACEMENT] {signal_tag} error: {e}")
+			await asyncio.sleep(2)
+
+	print(f"[RETRACEMENT] {signal_tag}: 5-minute timeout reached without price retracing to zone.")
+
+
 def send_trade(signal_data, accounts, monitor_account):
 	if not signal_data:
 		return None
@@ -571,6 +726,19 @@ def send_trade(signal_data, accounts, monitor_account):
 		return None
 
 	current_price = get_monitor_price(tick, action)
+
+	# Check for price spike too fast:
+	is_spike = False
+	if action == "BUY" and current_price > range_high:
+		is_spike = True
+	elif action == "SELL" and current_price < range_low:
+		is_spike = True
+
+	if is_spike:
+		print(f"Trade skipped: price spiked too fast ({current_price} is outside zone {range_low}-{range_high}). Will monitor for 5 minutes for retracement.")
+		asyncio.create_task(monitor_retracement_async(signal_data, accounts, monitor_account))
+		return None
+
 	if action == "BUY" and current_price <= sl:
 		print(f"Trade skipped: current price {current_price} is already at/below SL {sl}.")
 		return None
