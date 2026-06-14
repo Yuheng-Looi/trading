@@ -1,8 +1,9 @@
-# Trading Project - Environment Setup
 <p align="middle">
   <a href="README.md">English</a> •
   <a href="README-CN.md">中文</a>
 </p>
+
+# Trading Project - Environment Setup
 
 ## 1) Install MT5 and Python
 
@@ -18,9 +19,20 @@ When running the installer, check the two boxes at bottom, then continue with th
 
 ## 2) Download the Project
 
+Basic:
 1. Click the **<> Code** dropdown on GitHub.
 2. Download the ZIP file.
 3. Extract (unzip) it.
+
+
+Advance: 
+1. Install git with repective OS (Win/Mac/Linux):
+https://git-scm.com/install/
+
+2. After install successfully, open terminal in desired folder and run: 
+    ```bash
+    git clone https://github.com/Yuheng-Looi/trading.git 
+    ```
 
 ## 3) Create Virtual Environment
 

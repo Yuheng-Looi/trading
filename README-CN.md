@@ -1,4 +1,10 @@
+<p align="middle">
+  <a href="README.md">English</a> •
+  <a href="README-CN.md">中文</a>
+</p>
+
 # 交易项目 - 环境设置
+
 
 ## 1) 安装 Python
 
@@ -14,9 +20,18 @@ https://www.python.org/ftp/python/3.13.14/python-3.13.14-amd64.exe
 
 ## 2) 下载项目
 
+简易版：
 1. 点击 GitHub 上的 **<> Code** 下拉菜单。
 2. 下载 ZIP 文件。
 3. 解压（unzip）。
+
+进阶版：
+1. 根据OS下载git：
+https://git-scm.com/install/
+2. 下载完成后在自定义文件夹打开terminal：
+    ```bash
+    git clone https://github.com/Yuheng-Looi/trading.git 
+    ```    
 
 ## 3) 创建虚拟环境
 
