@@ -1,4 +1,8 @@
 # Trading Project - Environment Setup
+<p align="middle">
+  <a href="README.md">English</a> •
+  <a href="README-CN.md">中文</a>
+</p>
 
 ## 1) Install MT5 and Python
 
