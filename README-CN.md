@@ -8,7 +8,7 @@ https://www.metatrader5.com/en/download
 
 下载并安装 Python（独立安装程序）：
 
-https://www.python.org/ftp/python/3.14.5/python-3.14.5-amd64.exe
+https://www.python.org/ftp/python/3.13.14/python-3.13.14-amd64.exe
 
 运行安装程序时，勾选底部两个复选框，然后继续推荐安装。
 
