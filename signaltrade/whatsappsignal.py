@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import re
 import time
@@ -24,42 +25,63 @@ def split_csv_env(value):
 	return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def load_demo_accounts():
-	login_values = split_csv_env(os.getenv("DEMO_LOGIN", ""))
-	password_values = split_csv_env(os.getenv("DEMO_PASS", ""))
-	server = os.getenv("DEMO_MT5_SERVER", "").strip()
-
-	if not login_values:
-		print("No DEMO_LOGIN accounts configured.")
+def load_accounts_from_json():
+	json_path = os.path.join(os.path.dirname(__file__), "accounts.json")
+	if not os.path.exists(json_path):
+		print(f"Error: accounts.json not found at {json_path}")
 		return []
 
-	if not server:
-		print("Missing DEMO_MT5_SERVER in .env.")
+	print(f"Loading accounts from: {json_path}")
+	try:
+		with open(json_path, "r", encoding="utf-8") as f:
+			data = json.load(f)
+	except Exception as e:
+		print(f"Error parsing accounts.json: {e}")
 		return []
 
 	accounts = []
-	for index, login_value in enumerate(login_values, start=1):
-		try:
-			login = int(login_value)
-		except ValueError:
-			print(f"Skipping invalid DEMO_LOGIN entry: {login_value}")
-			continue
+	print("\n================ ACCOUNTS LOADED FROM JSON ================")
+	for group_name, group_data in data.items():
+		server = group_data.get("server", "").strip()
+		group_accounts = group_data.get("accounts", [])
+		print(f"Group: {group_name} | Server: {server}")
+		for index, acc in enumerate(group_accounts, start=1):
+			name = acc.get("name", "").strip()
+			account_id = acc.get("account_id", "").strip()
+			password = acc.get("password", "").strip()
+			lotsize_val = acc.get("lotsize", 0.0)
 
-		if len(password_values) == 1:
-			password = password_values[0]
-		elif index - 1 < len(password_values):
-			password = password_values[index - 1]
-		else:
-			print(f"Skipping account {login}: missing matching password in DEMO_PASS.")
-			continue
+			try:
+				lotsize = float(lotsize_val)
+			except (ValueError, TypeError):
+				lotsize = 0.0
 
-		accounts.append({
-			"label": f"DEMO-{index}",
-			"login": login,
-			"password": password,
-			"server": server,
-		})
+			print(f"  Account #{index}: Name='{name}', ID={account_id}, Password={'*' * len(password)}, Lotsize={lotsize}")
 
+			if not account_id:
+				print("    -> Skipped: Missing account_id")
+				continue
+
+			try:
+				login = int(account_id)
+			except ValueError:
+				print("    -> Skipped: Invalid account_id (not an integer)")
+				continue
+
+			if lotsize == 0.0:
+				print("    -> Skipped: Lotsize is 0.0")
+				continue
+
+			label = f"{group_name.upper()}-{name}-{login}"
+			accounts.append({
+				"label": label,
+				"login": login,
+				"password": password,
+				"server": server,
+				"lotsize": lotsize,
+			})
+	print(f"Total active accounts loaded (lotsize > 0): {len(accounts)}")
+	print("===========================================================\n")
 	return accounts
 
 
@@ -181,11 +203,88 @@ def send_order_request(account_label, request, description):
 
 	if result.retcode != mt5.TRADE_RETCODE_DONE:
 		error = mt5.last_error()
-		print(f"[{account_label}] {description} failed retcode={result.retcode} error={error}")
+		# Provide more detailed error messages for specific retcodes
+		retcode_name = "UNKNOWN"
+		if result.retcode == 10015:
+			retcode_name = "TRADE_BUY_ONLY (10015)"
+		elif result.retcode == 10016:
+			retcode_name = "TRADE_ONLY_REAL (10016)"
+		elif result.retcode == 10018:
+			retcode_name = "TRADE_NO_MONEY (10018)"
+		elif result.retcode == 10019:
+			retcode_name = "TRADE_PROHIBITED (10019)"
+		
+		# Log symbol and account info for debugging
+		account_info = mt5.account_info()
+		positions = mt5.positions_get(symbol=request.get("symbol", "")) or []
+		orders = mt5.orders_get(symbol=request.get("symbol", "")) or []
+		
+		print(f"[{account_label}] {description} failed retcode={result.retcode} ({retcode_name}) error={error}")
+		print(f"[{account_label}]   Account balance: {getattr(account_info, 'balance', 'N/A')}, "
+		      f"Free margin: {getattr(account_info, 'free_margin', 'N/A')}")
+		print(f"[{account_label}]   Existing positions: {len(positions)}, Existing orders: {len(orders)}")
+		
 		return None
 
 	print(f"[{account_label}] {description} placed ticket={result.order}")
 	return result
+
+
+async def monitor_signal_async(accounts, monitor_account, signal_data, signal_tag):
+	"""
+	Async monitoring coroutine for a single signal.
+	Runs independently and doesn't block other signals from being placed.
+	"""
+	symbol = signal_data["symbol"]
+	action = signal_data["action"]
+	range_low = signal_data["range_low"]
+	range_high = signal_data["range_high"]
+	sl = signal_data["sl"]
+	tp1 = signal_data["tp1"]
+
+	start_ts = time.time()
+	print(f"[ASYNC] Started monitoring {signal_tag} for {symbol}")
+
+	while time.time() - start_ts <= MONITOR_SECONDS:
+		try:
+			# Check MT5 state
+			tick = mt5.symbol_info_tick(symbol)
+			if tick is None:
+				await asyncio.sleep(MONITOR_POLL_INTERVAL)
+				continue
+
+			current_price = get_monitor_price(tick, action)
+			tp1_hit = current_price >= tp1 if action == "BUY" else current_price <= tp1
+			sl_hit = current_price <= sl if action == "BUY" else current_price >= sl
+
+			if tp1_hit:
+				print(f"[ASYNC] {signal_tag}: TP1 reached at {current_price}; moving SL to breakeven buffer and cancelling pending orders.")
+
+				def tp1_actions(account):
+					modify_signal_positions_for_account(account["label"], signal_data, signal_tag)
+					cancel_signal_pending_orders_for_account(account["label"], signal_data, signal_tag)
+
+				if not run_for_all_accounts(accounts, monitor_account, tp1_actions):
+					print(f"[ASYNC] {signal_tag}: Post-TP1 account restoration failed.")
+				return
+
+			if sl_hit:
+				print(f"[ASYNC] {signal_tag}: SL reached at {current_price}; cancelling any remaining pending orders.")
+
+				def sl_cleanup(account):
+					cancel_signal_pending_orders_for_account(account["label"], signal_data, signal_tag)
+
+				if not run_for_all_accounts(accounts, monitor_account, sl_cleanup):
+					print(f"[ASYNC] {signal_tag}: Post-SL account restoration failed.")
+				return
+
+			await asyncio.sleep(MONITOR_POLL_INTERVAL)
+
+		except Exception as e:
+			print(f"[ASYNC] {signal_tag}: Monitoring error: {e}")
+			await asyncio.sleep(MONITOR_POLL_INTERVAL)
+
+	print(f"[ASYNC] {signal_tag}: Monitor timeout reached.")
 
 
 def build_entry_plan(signal_data, current_price):
@@ -230,7 +329,9 @@ def build_entry_plan(signal_data, current_price):
 	return None
 
 
-def place_signal_orders_for_account(account_label, signal_data, signal_tag, current_price):
+def place_signal_orders_for_account(account, signal_data, signal_tag, current_price):
+	account_label = account["label"]
+	lotsize = account["lotsize"]
 	symbol = signal_data["symbol"]
 	action = signal_data["action"]
 	sl = signal_data["sl"]
@@ -267,10 +368,18 @@ def place_signal_orders_for_account(account_label, signal_data, signal_tag, curr
 			order_type = signal_side_limit_type(action)
 			action_type = mt5.TRADE_ACTION_PENDING
 
+		# Determine filling mode dynamically based on symbol properties
+		filling_mode = mt5.ORDER_FILLING_RETURN
+		if symbol_info is not None:
+			if symbol_info.filling_mode & 1:
+				filling_mode = mt5.ORDER_FILLING_FOK
+			elif symbol_info.filling_mode & 2:
+				filling_mode = mt5.ORDER_FILLING_IOC
+
 		request = {
 			"action": action_type,
 			"symbol": symbol,
-			"volume": float(LOT),
+			"volume": float(lotsize),
 			"type": order_type,
 			"sl": float(sl),
 			"tp": tp,
@@ -278,12 +387,27 @@ def place_signal_orders_for_account(account_label, signal_data, signal_tag, curr
 			"magic": MAGIC,
 			"comment": signal_tag,
 			"type_time": mt5.ORDER_TIME_GTC,
-			"type_filling": mt5.ORDER_FILLING_RETURN,
+			"type_filling": filling_mode,
 		}
 
 		# For pure market orders, price is typically ignored or set to 0 in MT5.
 		if not is_market:
 			request["price"] = price
+			# Validate SL/TP stops before sending to avoid Invalid Stops error
+			if action == "BUY":
+				if sl >= price:
+					print(f"[{account_label}] entry {index} skipped: SL {sl} is above/equal to pending entry price {price} (invalid stops)")
+					continue
+				if tp <= price:
+					print(f"[{account_label}] entry {index} skipped: TP {tp} is below/equal to pending entry price {price} (invalid stops)")
+					continue
+			elif action == "SELL":
+				if sl <= price:
+					print(f"[{account_label}] entry {index} skipped: SL {sl} is below/equal to pending entry price {price} (invalid stops)")
+					continue
+				if tp >= price:
+					print(f"[{account_label}] entry {index} skipped: TP {tp} is above/equal to pending entry price {price} (invalid stops)")
+					continue
 		else:
 			request["price"] = 0.0
 
@@ -420,7 +544,7 @@ def run_for_all_accounts(accounts, monitor_account, handler):
 
 def send_trade(signal_data, accounts, monitor_account):
 	if not signal_data:
-		return
+		return None
 
 	symbol = signal_data["symbol"]
 	action = signal_data["action"]
@@ -431,28 +555,28 @@ def send_trade(signal_data, accounts, monitor_account):
 
 	if not symbol.startswith("XAUUSD"):
 		print(f"Trade skipped: only XAUUSD signals are supported, got {symbol}.")
-		return
+		return None
 
 	if action not in {"BUY", "SELL"}:
 		print(f"Trade skipped: unsupported action {action}.")
-		return
+		return None
 
 	if not mt5.symbol_select(symbol, True):
 		print(f"Failed to select {symbol} on monitor account: {mt5.last_error()}")
-		return
+		return None
 
 	tick = mt5.symbol_info_tick(symbol)
 	if tick is None:
 		print(f"Failed to read current price for {symbol}: {mt5.last_error()}")
-		return
+		return None
 
 	current_price = get_monitor_price(tick, action)
 	if action == "BUY" and current_price <= sl:
 		print(f"Trade skipped: current price {current_price} is already at/below SL {sl}.")
-		return
+		return None
 	if action == "SELL" and current_price >= sl:
 		print(f"Trade skipped: current price {current_price} is already at/above SL {sl}.")
-		return
+		return None
 
 	signal_tag = build_comment()
 	print(f"Processing signal {signal_tag}: {symbol} {action} range={range_low}-{range_high} SL={sl} TP1={tp1}")
@@ -460,52 +584,20 @@ def send_trade(signal_data, accounts, monitor_account):
 	placed_state = {"placed": False}
 
 	def place_entries(account):
-		placed = place_signal_orders_for_account(account["label"], signal_data, signal_tag, current_price)
+		placed = place_signal_orders_for_account(account, signal_data, signal_tag, current_price)
 		placed_state["placed"] = placed_state["placed"] or placed
 
 	if not run_for_all_accounts(accounts, monitor_account, place_entries):
 		print("Trade flow stopped: monitor account could not be restored after entry placement.")
-		return
+		return None
 
 	if not placed_state["placed"]:
 		print(f"No orders were placed for {signal_tag}.")
-		return
+		return None
 
-	start_ts = time.time()
-	while time.time() - start_ts <= MONITOR_SECONDS:
-		tick = mt5.symbol_info_tick(symbol)
-		if tick is None:
-			time.sleep(MONITOR_POLL_INTERVAL)
-			continue
-
-		current_price = get_monitor_price(tick, action)
-		tp1_hit = current_price >= tp1 if action == "BUY" else current_price <= tp1
-		sl_hit = current_price <= sl if action == "BUY" else current_price >= sl
-
-		if tp1_hit:
-			print(f"TP1 reached at {current_price}; moving SL to breakeven buffer and cancelling pending orders.")
-
-			def tp1_actions(account):
-				modify_signal_positions_for_account(account["label"], signal_data, signal_tag)
-				cancel_signal_pending_orders_for_account(account["label"], signal_data, signal_tag)
-
-			if not run_for_all_accounts(accounts, monitor_account, tp1_actions):
-				print("Post-TP1 account restoration failed.")
-			return
-
-		if sl_hit:
-			print(f"SL reached at {current_price}; cancelling any remaining pending orders.")
-
-			def sl_cleanup(account):
-				cancel_signal_pending_orders_for_account(account["label"], signal_data, signal_tag)
-
-			if not run_for_all_accounts(accounts, monitor_account, sl_cleanup):
-				print("Post-SL account restoration failed.")
-			return
-
-		time.sleep(MONITOR_POLL_INTERVAL)
-
-	print(f"Monitor timeout reached for {signal_tag}.")
+	# Return signal_tag to be used for async monitoring
+	print(f"[INFO] Orders placed for {signal_tag}; monitoring will continue asynchronously.")
+	return signal_tag
 
 
 async def monitor_signals_from_notifications(accounts, monitor_account):
@@ -515,6 +607,18 @@ async def monitor_signals_from_notifications(accounts, monitor_account):
 		print(f"Monitoring WhatsApp group: '{target_group}'")
 	else:
 		print("TARGET_WA_GROUP is empty; all WhatsApp notifications will be considered.")
+
+	# Track active monitoring tasks
+	active_tasks = set()
+
+	async def cleanup_task(task):
+		"""Remove completed tasks from tracking."""
+		try:
+			await task
+		except Exception as e:
+			print(f"[CLEANUP] Task error: {e}")
+		finally:
+			active_tasks.discard(task)
 
 	while True:
 		try:
@@ -534,7 +638,21 @@ async def monitor_signals_from_notifications(accounts, monitor_account):
 				signal_json = parse_signal(body)
 				print("Parsed Signal:", signal_json)
 
-				send_trade(signal_json, accounts, monitor_account)
+				# Place orders immediately (non-blocking), returns signal_tag if successful
+				signal_tag = send_trade(signal_json, accounts, monitor_account)
+
+				# If orders were placed (signal_tag is not None), spawn async monitoring task
+				if signal_tag:
+					# Create monitoring task that runs concurrently
+					task = asyncio.create_task(
+						monitor_signal_async(accounts, monitor_account, signal_json, signal_tag)
+					)
+					active_tasks.add(task)
+					# Schedule cleanup when task completes
+					asyncio.create_task(cleanup_task(task))
+
+					# Log active monitoring count
+					print(f"[INFO] Currently monitoring {len(active_tasks)} concurrent signal(s)")
 
 		except Exception as e:
 			print(f"Notification read error: {e}")
@@ -545,7 +663,7 @@ async def monitor_signals_from_notifications(accounts, monitor_account):
 
 
 def main():
-	accounts = load_demo_accounts()
+	accounts = load_accounts_from_json()
 	if not accounts:
 		return
 
@@ -556,7 +674,7 @@ def main():
 			break
 
 	if monitor_account is None:
-		print("No demo account could be logged in for monitoring.")
+		print("No account could be logged in for monitoring.")
 		return
 
 	try:

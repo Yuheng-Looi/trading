@@ -1,0 +1,30 @@
+{
+    "live": {
+        "server": "FortunePrime-Live2",
+        "accounts": [
+            {
+                "name": "John",
+                "account_id": "100003289",
+                "password": "securepassword123",
+                "lotsize": 0.00
+            }
+        ]
+    },
+    "demo": {
+        "server": "FortunePrime-Demo2",
+        "accounts": [
+            {
+                "name": "Yu Heng",
+                "account_id": "100003289",
+                "password": "BcI-6jRj",
+                "lotsize": 0.01
+            },
+            {
+                "name": "Timothy",
+                "account_id": "100007541",
+                "password": "*e1oEiSa",
+                "lotsize": 0.02
+            }
+        ]
+    }
+}
