@@ -17,13 +17,13 @@
                 "name": "Yu Heng",
                 "account_id": "100003289",
                 "password": "BcI-6jRj",
-                "lotsize": 0.01
+                "lotsize": 0.02
             },
             {
                 "name": "Timothy",
                 "account_id": "100007541",
                 "password": "*e1oEiSa",
-                "lotsize": 0.02
+                "lotsize": 0.05
             }
         ]
     }
