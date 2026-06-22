@@ -20,3 +20,5 @@ telegram_signal_session.*
 __pycache__/
 **/__pycache__/
 **/telegram_signal_session.*
+accounts.json
+*.log
